@@ -1,4 +1,4 @@
-# main.py (Railway/Render FastAPI Service)
+# main.py (Complete with Master Training Database + Hostinger Upload)
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,11 +9,15 @@ from openpyxl.drawing.image import Image as OpenpyxlImage
 import requests
 from io import BytesIO
 import os
+import shutil
 import traceback
 import time
+from datetime import datetime
+from pathlib import Path
+from ftplib import FTP
 
 app = FastAPI(title="Excel Export Service")
-                    
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -22,6 +26,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Master database configuration
+MASTER_DB_PATH = "master/Training_Database_Master.xlsx"
+MASTER_DIR = "master"
+
+# Hostinger FTP configuration
+HOSTINGER_FTP_HOST = os.environ.get("HOSTINGER_SFTP_HOST", "")
+HOSTINGER_FTP_USER = os.environ.get("HOSTINGER_SFTP_USER", "")
+HOSTINGER_FTP_PASS = os.environ.get("HOSTINGER_SFTP_PASS", "")
+HOSTINGER_REMOTE_DIR = "/files/public_html/uploads/trainees/directory/"
+HOSTINGER_PUBLIC_URL = "https://petrosphere.com.ph/uploads/trainees/directory/"
 
 class Trainee(BaseModel):
     id: str
@@ -51,6 +66,77 @@ class ExportRequest(BaseModel):
     trainingDates: str
     scheduleId: str
     proxyUrl: Optional[str] = None
+    eventType: Optional[str] = None
+    branch: Optional[str] = None
+
+def upload_master_to_hostinger():
+    """Upload the master Excel file to Hostinger via FTP"""
+    try:
+        if not os.path.exists(MASTER_DB_PATH):
+            print("⚠️  Master file doesn't exist, skipping upload")
+            return None
+        
+        if not all([HOSTINGER_FTP_HOST, HOSTINGER_FTP_USER, HOSTINGER_FTP_PASS]):
+            print("⚠️  Hostinger FTP credentials not configured")
+            return None
+        
+        print(f"\n{'='*60}")
+        print(f"📤 UPLOADING MASTER FILE TO HOSTINGER")
+        print(f"{'='*60}")
+        print(f"Host: {HOSTINGER_FTP_HOST}")
+        print(f"User: {HOSTINGER_FTP_USER}")
+        print(f"Remote Directory: {HOSTINGER_REMOTE_DIR}")
+        
+        # Connect to FTP
+        ftp = FTP()
+        ftp.connect(HOSTINGER_FTP_HOST, 21, timeout=30)
+        ftp.login(HOSTINGER_FTP_USER, HOSTINGER_FTP_PASS)
+        
+        print(f"✅ Connected to FTP server")
+        
+        # Navigate to directory
+        try:
+            ftp.cwd(HOSTINGER_REMOTE_DIR)
+            print(f"✅ Changed to remote directory: {HOSTINGER_REMOTE_DIR}")
+        except Exception as e:
+            print(f"⚠️  Directory doesn't exist, creating: {HOSTINGER_REMOTE_DIR}")
+            # Create directory structure if needed
+            dirs = HOSTINGER_REMOTE_DIR.strip('/').split('/')
+            current_dir = '/'
+            for dir_name in dirs:
+                current_dir = f"{current_dir}{dir_name}/"
+                try:
+                    ftp.cwd(current_dir)
+                except:
+                    ftp.mkd(dir_name)
+                    ftp.cwd(current_dir)
+        
+        # Upload file with timestamp in filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        remote_filename = f"Training_Database_Master_{timestamp}.xlsx"
+        
+        print(f"📁 Uploading as: {remote_filename}")
+        
+        with open(MASTER_DB_PATH, 'rb') as file:
+            file_size = os.path.getsize(MASTER_DB_PATH)
+            print(f"📦 File size: {file_size:,} bytes")
+            
+            ftp.storbinary(f'STOR {remote_filename}', file)
+        
+        ftp.quit()
+        
+        public_url = f"{HOSTINGER_PUBLIC_URL}{remote_filename}"
+        
+        print(f"✅ Upload successful!")
+        print(f"🔗 Public URL: {public_url}")
+        print(f"{'='*60}\n")
+        
+        return public_url
+        
+    except Exception as e:
+        print(f"❌ Error uploading to Hostinger: {str(e)}")
+        traceback.print_exc()
+        return None
 
 def get_template_filename(trainee_count: int) -> str:
     """Determine which template to use based on trainee count"""
@@ -79,6 +165,21 @@ def get_template_filename(trainee_count: int) -> str:
 
 def fetch_image_with_retry(url: str, max_retries: int = 3) -> Optional[bytes]:
     """Fetch image with retry logic"""
+    
+    # Check if URL is localhost (can't be accessed from Render)
+    if 'localhost' in url:
+        print(f"   ⚠️  WARNING: URL contains 'localhost' - this won't work from Render!")
+        print(f"   💡 Trying to extract actual image URL...")
+        
+        # Try to extract the actual image URL from the proxy URL
+        if '?url=' in url:
+            actual_url = url.split('?url=', 1)[1]
+            print(f"   ✅ Extracted actual URL: {actual_url[:100]}...")
+            url = actual_url
+        else:
+            print(f"   ❌ Cannot extract actual URL, will fail")
+            return None
+    
     for attempt in range(max_retries):
         try:
             print(f"   Attempt {attempt + 1}/{max_retries}...")
@@ -98,7 +199,7 @@ def fetch_image_with_retry(url: str, max_retries: int = 3) -> Optional[bytes]:
                 print(f"   HTTP {response.status_code}: {response.reason}")
                 
             if attempt < max_retries - 1:
-                time.sleep(1)  # Wait before retry
+                time.sleep(1)
                 
         except requests.exceptions.Timeout:
             print(f"   Timeout on attempt {attempt + 1}")
@@ -111,18 +212,166 @@ def fetch_image_with_retry(url: str, max_retries: int = 3) -> Optional[bytes]:
     
     return None
 
+def ensure_master_exists():
+    """Ensure master training database exists"""
+    if not os.path.exists(MASTER_DIR):
+        os.makedirs(MASTER_DIR)
+        print(f"✅ Created master directory: {MASTER_DIR}")
+    
+    # If master doesn't exist, create it from template
+    if not os.path.exists(MASTER_DB_PATH):
+        base_template = "templates/Directory-5.xlsx"
+        shutil.copy(base_template, MASTER_DB_PATH)
+        print(f"✅ Created new master training database at {MASTER_DB_PATH}")
+    
+    return MASTER_DB_PATH
+
+def get_next_database_row(db_ws):
+    """Find the next available row in Training Database sheet"""
+    next_row = 14  # Start from row 14
+    
+    # Find the last filled row by checking column B (Course Name)
+    while db_ws[f'B{next_row}'].value is not None:
+        next_row += 1
+    
+    return next_row
+
+def append_to_master_database(course_name, training_dates, schedule_id, 
+                              trainee_count, male_count, female_count, 
+                              mode_of_training):
+    """Append a new record to the master training database"""
+    try:
+        master_path = ensure_master_exists()
+        
+        # Load the master workbook
+        master_wb = load_workbook(master_path)
+        
+        if 'Training Database' not in master_wb.sheetnames:
+            print("⚠️  'Training Database' sheet not found in master file")
+            master_wb.close()
+            return False
+        
+        db_ws = master_wb['Training Database']
+        
+        # Find next available row
+        next_row = get_next_database_row(db_ws)
+        record_number = next_row - 14
+        
+        print(f"📝 Appending to master database at row {next_row} (Record #{record_number})")
+        
+        # Write the data
+        db_ws[f'A{next_row}'] = record_number
+        db_ws[f'B{next_row}'] = course_name
+        db_ws[f'C{next_row}'] = training_dates
+        db_ws[f'D{next_row}'] = f"#{schedule_id[-4:]}"
+        db_ws[f'E{next_row}'] = trainee_count
+        db_ws[f'F{next_row}'] = male_count
+        db_ws[f'G{next_row}'] = female_count
+        db_ws[f'M{next_row}'] = mode_of_training
+        db_ws[f'N{next_row}'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Save the master file
+        master_wb.save(master_path)
+        master_wb.close()
+        
+        print(f"✅ Master database updated (Total records: {record_number})")
+        
+        # Upload to Hostinger
+        hostinger_url = upload_master_to_hostinger()
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error updating master database: {str(e)}")
+        traceback.print_exc()
+        return False
+
+def copy_master_database_to_export(wb):
+    """Copy all records from master database to the export workbook"""
+    try:
+        if not os.path.exists(MASTER_DB_PATH):
+            print("⚠️  Master database doesn't exist yet")
+            return False
+        
+        master_wb = load_workbook(MASTER_DB_PATH)
+        
+        if 'Training Database' not in master_wb.sheetnames:
+            print("⚠️  'Training Database' sheet not found in master")
+            master_wb.close()
+            return False
+        
+        if 'Training Database' not in wb.sheetnames:
+            print("⚠️  'Training Database' sheet not found in export")
+            master_wb.close()
+            return False
+        
+        master_db_ws = master_wb['Training Database']
+        export_db_ws = wb['Training Database']
+        
+        # Copy all data from row 14 onwards
+        row_num = 14
+        copied_rows = 0
+        
+        while master_db_ws[f'B{row_num}'].value is not None:
+            # Copy each cell from master to export
+            for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'M', 'N']:
+                export_db_ws[f'{col}{row_num}'].value = master_db_ws[f'{col}{row_num}'].value
+            
+            row_num += 1
+            copied_rows += 1
+        
+        master_wb.close()
+        print(f"✅ Copied {copied_rows} records from master database to export")
+        return True
+        
+    except Exception as e:
+        print(f"⚠️  Error copying master database: {str(e)}")
+        return False
+
 @app.get("/")
 def read_root() -> dict:
     return {
-        "service": "Excel Export Service",
+        "service": "Excel Export Service with Master Database + Hostinger Backup",
         "status": "running",
-        "version": "2.0.0",
-        "features": ["Image proxying", "Hostinger support", "Retry logic"]
+        "version": "4.0.0",
+        "features": [
+            "Image proxying", 
+            "Hostinger support", 
+            "Master database", 
+            "Historical records",
+            "Automatic Hostinger backup"
+        ]
     }
 
 @app.get("/health")
 def health_check() -> dict:
     return {"status": "healthy"}
+
+@app.get("/database/stats")
+def get_database_stats() -> dict:
+    """Get statistics about the master database"""
+    try:
+        if not os.path.exists(MASTER_DB_PATH):
+            return {"records": 0, "exists": False}
+        
+        wb = load_workbook(MASTER_DB_PATH)
+        if 'Training Database' not in wb.sheetnames:
+            wb.close()
+            return {"records": 0, "exists": True, "hasSheet": False}
+        
+        db_ws = wb['Training Database']
+        row_count = get_next_database_row(db_ws) - 14
+        wb.close()
+        
+        return {
+            "records": row_count,
+            "exists": True,
+            "hasSheet": True,
+            "path": MASTER_DB_PATH,
+            "hostinger_configured": bool(HOSTINGER_FTP_HOST and HOSTINGER_FTP_USER and HOSTINGER_FTP_PASS)
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/export-excel")
 def export_excel(request: ExportRequest) -> StreamingResponse:
@@ -132,18 +381,22 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
         training_dates = request.trainingDates
         schedule_id = request.scheduleId
         proxy_url = request.proxyUrl
+        event_type = request.eventType or 'public'
+        branch = request.branch or 'online'
+        
+        # Determine mode of training
+        if event_type.lower() == 'public':
+            mode_of_training = f"Public - {branch.title()}"
+        elif event_type.lower() == 'in-house':
+            mode_of_training = f"In-House - {branch.title()}"
+        else:
+            mode_of_training = branch.title()
 
         if not trainees:
-            raise HTTPException(
-                status_code=400,
-                detail="At least one trainee is required to generate the Excel file.",
-            )
+            raise HTTPException(status_code=400, detail="At least one trainee is required")
 
         if not schedule_id or len(schedule_id) < 4:
-            raise HTTPException(
-                status_code=400,
-                detail="scheduleId is required and must be at least 4 characters long.",
-            )
+            raise HTTPException(status_code=400, detail="scheduleId is required")
 
         trainee_count = len(trainees)
         
@@ -154,21 +407,20 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
         print(f"Dates: {training_dates}")
         print(f"Schedule ID: {schedule_id}")
         print(f"Trainee Count: {trainee_count}")
+        print(f"Event Type: {event_type}")
+        print(f"Branch: {branch}")
+        print(f"Mode of Training: {mode_of_training}")
         print(f"Proxy URL: {proxy_url or 'Direct (no proxy)'}")
         print(f"{'='*60}\n")
         
-        # Get template filename
+        # Get template
         template_filename = get_template_filename(trainee_count)
         template_path = f"templates/{template_filename}"
         
         print(f"📄 Loading template: {template_filename}")
         
-        # Check if template exists
         if not os.path.exists(template_path):
-            raise HTTPException(
-                status_code=404,
-                detail=f"Template not found: {template_filename}"
-            )
+            raise HTTPException(status_code=404, detail=f"Template not found: {template_filename}")
         
         # Load workbook
         wb = load_workbook(template_path)
@@ -186,8 +438,6 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
         
         # Participant rows start from row 15
         start_row = 15
-        
-        # Track image statistics
         images_attempted = 0
         images_successful = 0
         images_failed = 0
@@ -223,7 +473,7 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
             ws[f'P{row_num}'] = trainee.email or ''
             ws[f'Q{row_num}'] = trainee.phone_number or ''
             ws[f'R{row_num}'] = trainee.company_landline or ''
-            ws[f'T{row_num}'] = 'Online Training'
+            ws[f'T{row_num}'] = mode_of_training
             ws[f'U{row_num}'] = f"#{trainee.schedule_id[-4:]}"
             
             # Add image if picture URL exists
@@ -232,88 +482,83 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
                 print(f"   📸 Processing image...")
                 
                 try:
-                    # Use proxy URL if provided, otherwise direct
                     if proxy_url:
                         img_url = f"{proxy_url}?url={trainee.picture_2x2_url}"
-                        print(f"   🔗 Via proxy: {proxy_url}")
+                        print(f"   🔗 Via proxy")
                     else:
                         img_url = trainee.picture_2x2_url
-                        print(f"   🔗 Direct: {trainee.picture_2x2_url[:80]}...")
+                        print(f"   🔗 Direct")
                     
-                    # Fetch image with retry
                     image_data = fetch_image_with_retry(img_url)
                     
                     if image_data:
-                        # Verify it's actually image data
                         if len(image_data) < 100:
-                            print(f"   ⚠️  Warning: Image too small ({len(image_data)} bytes)")
+                            print(f"   ⚠️  Image too small")
                             images_failed += 1
                             failed_images.append(f"{trainee.first_name} {trainee.last_name}")
                             continue
                         
                         img = OpenpyxlImage(BytesIO(image_data))
-                        
-                        # Set image size to 96x96 pixels
                         img.width = 96
                         img.height = 96
-                        
-                        # Add image to cell S (column 19)
                         ws.add_image(img, f'S{row_num}')
                         images_successful += 1
                         print(f"   ✅ Image added ({len(image_data)} bytes)")
                     else:
                         images_failed += 1
                         failed_images.append(f"{trainee.first_name} {trainee.last_name}")
-                        print(f"   ❌ Failed to fetch image after retries")
+                        print(f"   ❌ Failed to fetch image")
                         
                 except Exception as e:
                     images_failed += 1
                     failed_images.append(f"{trainee.first_name} {trainee.last_name}")
-                    print(f"   ❌ Error: {type(e).__name__}: {str(e)}")
+                    print(f"   ❌ Error: {type(e).__name__}")
             else:
                 print(f"   ⚪ No image URL")
         
-        # Print image processing summary
         print(f"\n{'='*60}")
         print(f"📸 IMAGE PROCESSING SUMMARY")
         print(f"{'='*60}")
         print(f"Attempted: {images_attempted}")
         print(f"Successful: {images_successful}")
         print(f"Failed: {images_failed}")
-        
         if failed_images:
             print(f"\nFailed images for:")
             for name in failed_images:
                 print(f"  • {name}")
+        print(f"{'='*60}\n")
+        
+        # Update master database
+        print(f"{'='*60}")
+        print(f"💾 UPDATING MASTER DATABASE")
+        print(f"{'='*60}")
+        
+        append_to_master_database(
+            course_name=course_name,
+            training_dates=training_dates,
+            schedule_id=schedule_id,
+            trainee_count=trainee_count,
+            male_count=male_count,
+            female_count=female_count,
+            mode_of_training=mode_of_training
+        )
+        
+        # Copy all records from master to this export
+        copy_master_database_to_export(wb)
         
         print(f"{'='*60}\n")
         
-        # Update Training Database sheet if it exists
-        try:
-            db_ws = wb['Training Database']
-            db_ws['A11'] = 1
-            db_ws['B11'] = course_name
-            db_ws['C11'] = training_dates
-            db_ws['D11'] = f"#{schedule_id[-4:]}"
-            db_ws['E11'] = trainee_count
-            db_ws['F11'] = male_count
-            db_ws['G11'] = female_count
-            db_ws['M11'] = 'Online Training'
-            print("✅ Training Database sheet updated")
-        except Exception as e:
-            print(f"⚠️  Training Database sheet not found or update failed")
-        
         # Save to BytesIO
-        print(f"\n💾 Saving Excel file...")
+        print(f"💾 Saving Excel file...")
         output = BytesIO()
         wb.save(output)
         output.seek(0)
+        wb.close()
         
         file_size = output.getbuffer().nbytes
-        print(f"✅ Excel file generated successfully ({file_size:,} bytes)")
+        print(f"✅ Excel file generated ({file_size:,} bytes)")
         print(f"{'='*60}\n")
         
-        # Return file as streaming response
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -334,5 +579,5 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    print(f"🚀 Starting Excel Export Service on port {port}")
+    print(f"🚀 Starting Excel Export Service with Master Database + Hostinger Backup on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
