@@ -1,4 +1,4 @@
-# main.py (Railway FastAPI Service)
+# main.py (Railway/Render FastAPI Service)
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,13 +9,15 @@ from openpyxl.drawing.image import Image as OpenpyxlImage
 import requests
 from io import BytesIO
 import os
+import traceback
+import time
 
 app = FastAPI(title="Excel Export Service")
                     
-# CORS middleware - allow your Vercel domain
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your Vercel domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -75,16 +77,51 @@ def get_template_filename(trainee_count: int) -> str:
     else:
         return 'Directory-5.xlsx'
 
+def fetch_image_with_retry(url: str, max_retries: int = 3) -> Optional[bytes]:
+    """Fetch image with retry logic"""
+    for attempt in range(max_retries):
+        try:
+            print(f"   Attempt {attempt + 1}/{max_retries}...")
+            
+            response = requests.get(
+                url, 
+                timeout=30,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'image/*,*/*',
+                }
+            )
+            
+            if response.status_code == 200:
+                return response.content
+            else:
+                print(f"   HTTP {response.status_code}: {response.reason}")
+                
+            if attempt < max_retries - 1:
+                time.sleep(1)  # Wait before retry
+                
+        except requests.exceptions.Timeout:
+            print(f"   Timeout on attempt {attempt + 1}")
+            if attempt < max_retries - 1:
+                time.sleep(1)
+        except Exception as e:
+            print(f"   Error on attempt {attempt + 1}: {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(1)
+    
+    return None
+
 @app.get("/")
-def read_root() -> dict[str, str]:
+def read_root() -> dict:
     return {
         "service": "Excel Export Service",
         "status": "running",
-        "version": "1.0.0"
+        "version": "2.0.0",
+        "features": ["Image proxying", "Hostinger support", "Retry logic"]
     }
 
 @app.get("/health")
-def health_check() -> dict[str, str]:
+def health_check() -> dict:
     return {"status": "healthy"}
 
 @app.post("/export-excel")
@@ -110,11 +147,21 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
 
         trainee_count = len(trainees)
         
+        print(f"\n{'='*60}")
+        print(f"📊 EXCEL EXPORT REQUEST")
+        print(f"{'='*60}")
+        print(f"Course: {course_name}")
+        print(f"Dates: {training_dates}")
+        print(f"Schedule ID: {schedule_id}")
+        print(f"Trainee Count: {trainee_count}")
+        print(f"Proxy URL: {proxy_url or 'Direct (no proxy)'}")
+        print(f"{'='*60}\n")
+        
         # Get template filename
         template_filename = get_template_filename(trainee_count)
         template_path = f"templates/{template_filename}"
         
-        print(f"Loading template: {template_path} for {trainee_count} trainees")
+        print(f"📄 Loading template: {template_filename}")
         
         # Check if template exists
         if not os.path.exists(template_path):
@@ -135,15 +182,28 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
         male_count = sum(1 for t in trainees if t.gender and t.gender.lower() == 'male')
         female_count = sum(1 for t in trainees if t.gender and t.gender.lower() == 'female')
         
+        print(f"👥 Gender Distribution: Male={male_count}, Female={female_count}")
+        
         # Participant rows start from row 15
         start_row = 15
+        
+        # Track image statistics
+        images_attempted = 0
+        images_successful = 0
+        images_failed = 0
+        failed_images = []
+        
+        print(f"\n{'='*60}")
+        print(f"📝 PROCESSING TRAINEES")
+        print(f"{'='*60}\n")
         
         for i, trainee in enumerate(trainees):
             row_num = start_row + i
             
+            print(f"[{i+1}/{trainee_count}] {trainee.first_name} {trainee.last_name}")
+            
             # Fill data
             ws[f'A{row_num}'] = i + 1
-            # ws[f'B{row_num}'] = trainee.certificate_number or ''  # Commented out
             ws[f'C{row_num}'] = (trainee.last_name or '').upper()
             ws[f'D{row_num}'] = (trainee.first_name or '').upper()
             
@@ -168,30 +228,65 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
             
             # Add image if picture URL exists
             if trainee.picture_2x2_url:
+                images_attempted += 1
+                print(f"   📸 Processing image...")
+                
                 try:
-                    # Use proxy URL if provided
+                    # Use proxy URL if provided, otherwise direct
                     if proxy_url:
                         img_url = f"{proxy_url}?url={trainee.picture_2x2_url}"
+                        print(f"   🔗 Via proxy: {proxy_url}")
                     else:
                         img_url = trainee.picture_2x2_url
+                        print(f"   🔗 Direct: {trainee.picture_2x2_url[:80]}...")
                     
-                    print(f"Fetching image {i+1}: {img_url}")
+                    # Fetch image with retry
+                    image_data = fetch_image_with_retry(img_url)
                     
-                    response = requests.get(img_url, timeout=10)
-                    if response.status_code == 200:
-                        img = OpenpyxlImage(BytesIO(response.content))
+                    if image_data:
+                        # Verify it's actually image data
+                        if len(image_data) < 100:
+                            print(f"   ⚠️  Warning: Image too small ({len(image_data)} bytes)")
+                            images_failed += 1
+                            failed_images.append(f"{trainee.first_name} {trainee.last_name}")
+                            continue
+                        
+                        img = OpenpyxlImage(BytesIO(image_data))
                         
                         # Set image size to 96x96 pixels
                         img.width = 96
                         img.height = 96
                         
-                        # Add image to cell S
+                        # Add image to cell S (column 19)
                         ws.add_image(img, f'S{row_num}')
-                        print(f"✓ Image {i+1} added successfully")
+                        images_successful += 1
+                        print(f"   ✅ Image added ({len(image_data)} bytes)")
                     else:
-                        print(f"✗ Failed to fetch image {i+1}: HTTP {response.status_code}")
+                        images_failed += 1
+                        failed_images.append(f"{trainee.first_name} {trainee.last_name}")
+                        print(f"   ❌ Failed to fetch image after retries")
+                        
                 except Exception as e:
-                    print(f"✗ Error adding image {i+1}: {str(e)}")
+                    images_failed += 1
+                    failed_images.append(f"{trainee.first_name} {trainee.last_name}")
+                    print(f"   ❌ Error: {type(e).__name__}: {str(e)}")
+            else:
+                print(f"   ⚪ No image URL")
+        
+        # Print image processing summary
+        print(f"\n{'='*60}")
+        print(f"📸 IMAGE PROCESSING SUMMARY")
+        print(f"{'='*60}")
+        print(f"Attempted: {images_attempted}")
+        print(f"Successful: {images_successful}")
+        print(f"Failed: {images_failed}")
+        
+        if failed_images:
+            print(f"\nFailed images for:")
+            for name in failed_images:
+                print(f"  • {name}")
+        
+        print(f"{'='*60}\n")
         
         # Update Training Database sheet if it exists
         try:
@@ -204,15 +299,19 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
             db_ws['F11'] = male_count
             db_ws['G11'] = female_count
             db_ws['M11'] = 'Online Training'
+            print("✅ Training Database sheet updated")
         except Exception as e:
-            print(f"Training Database sheet not found: {str(e)}")
+            print(f"⚠️  Training Database sheet not found or update failed")
         
         # Save to BytesIO
+        print(f"\n💾 Saving Excel file...")
         output = BytesIO()
         wb.save(output)
         output.seek(0)
         
-        print(f"✓ Excel file generated successfully")
+        file_size = output.getbuffer().nbytes
+        print(f"✅ Excel file generated successfully ({file_size:,} bytes)")
+        print(f"{'='*60}\n")
         
         # Return file as streaming response
         return StreamingResponse(
@@ -224,10 +323,16 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
         )
     
     except Exception as e:
+        print(f"\n{'='*60}")
+        print(f"❌ FATAL ERROR")
+        print(f"{'='*60}")
         print(f"Error: {str(e)}")
+        traceback.print_exc()
+        print(f"{'='*60}\n")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
+    print(f"🚀 Starting Excel Export Service on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
