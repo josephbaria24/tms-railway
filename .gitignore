@@ -1,0 +1,17 @@
+# .gitignore (for Railway repo)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.log
+.env
+.venv
