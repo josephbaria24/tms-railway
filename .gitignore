@@ -1,4 +1,4 @@
-# .gitignore (for Railway repo)
+# .gitignore (for Render repo)
 __pycache__/
 *.py[cod]
 *$py.class
@@ -15,3 +15,4 @@ build/
 *.log
 .env
 .venv
+.DS_Store

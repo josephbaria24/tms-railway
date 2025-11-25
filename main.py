@@ -11,7 +11,7 @@ from io import BytesIO
 import os
 
 app = FastAPI(title="Excel Export Service")
-
+                    
 # CORS middleware - allow your Vercel domain
 app.add_middleware(
     CORSMiddleware,
@@ -76,7 +76,7 @@ def get_template_filename(trainee_count: int) -> str:
         return 'Directory-5.xlsx'
 
 @app.get("/")
-def read_root():
+def read_root() -> dict[str, str]:
     return {
         "service": "Excel Export Service",
         "status": "running",
@@ -84,18 +84,30 @@ def read_root():
     }
 
 @app.get("/health")
-def health_check():
+def health_check() -> dict[str, str]:
     return {"status": "healthy"}
 
 @app.post("/export-excel")
-async def export_excel(request: ExportRequest):
+def export_excel(request: ExportRequest) -> StreamingResponse:
     try:
         trainees = request.trainees
         course_name = request.courseName
         training_dates = request.trainingDates
         schedule_id = request.scheduleId
         proxy_url = request.proxyUrl
-        
+
+        if not trainees:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one trainee is required to generate the Excel file.",
+            )
+
+        if not schedule_id or len(schedule_id) < 4:
+            raise HTTPException(
+                status_code=400,
+                detail="scheduleId is required and must be at least 4 characters long.",
+            )
+
         trainee_count = len(trainees)
         
         # Get template filename
