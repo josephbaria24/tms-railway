@@ -348,22 +348,34 @@ def health_check() -> dict:
     return {"status": "healthy"}
 
 @app.get("/database/stats")
-def get_database_stats() -> dict:
+def get_database_stats():
     """Get statistics about the master database"""
     try:
         if not os.path.exists(MASTER_DB_PATH):
-            return {"records": 0, "exists": False}
+            return {
+                "status": "success",
+                "records": 0, 
+                "exists": False,
+                "hostinger_configured": bool(HOSTINGER_FTP_HOST and HOSTINGER_FTP_USER and HOSTINGER_FTP_PASS)
+            }
         
         wb = load_workbook(MASTER_DB_PATH)
         if 'Training Database' not in wb.sheetnames:
             wb.close()
-            return {"records": 0, "exists": True, "hasSheet": False}
+            return {
+                "status": "success",
+                "records": 0, 
+                "exists": True, 
+                "hasSheet": False,
+                "hostinger_configured": bool(HOSTINGER_FTP_HOST and HOSTINGER_FTP_USER and HOSTINGER_FTP_PASS)
+            }
         
         db_ws = wb['Training Database']
         row_count = get_next_database_row(db_ws) - 14
         wb.close()
         
         return {
+            "status": "success",
             "records": row_count,
             "exists": True,
             "hasSheet": True,
@@ -371,7 +383,196 @@ def get_database_stats() -> dict:
             "hostinger_configured": bool(HOSTINGER_FTP_HOST and HOSTINGER_FTP_USER and HOSTINGER_FTP_PASS)
         }
     except Exception as e:
-        return {"error": str(e)}
+        print(f"❌ Error getting database stats: {str(e)}")
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+@app.post("/database/reset")
+def reset_master_database():
+    """
+    Reset the master database to empty state.
+    This will backup the current master and create a fresh one.
+    """
+    try:
+        print(f"\n{'='*60}")
+        print(f"🔄 DATABASE RESET REQUEST")
+        print(f"{'='*60}")
+        
+        if not os.path.exists(MASTER_DB_PATH):
+            print("⚠️  Master database doesn't exist, nothing to reset")
+            return {
+                "status": "success",
+                "message": "Master database doesn't exist, nothing to reset"
+            }
+        
+        # Create backup with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = f"{MASTER_DIR}/Training_Database_Master_BACKUP_{timestamp}.xlsx"
+        
+        # Backup current master
+        shutil.copy(MASTER_DB_PATH, backup_path)
+        print(f"✅ Backed up master to: {backup_path}")
+        
+        # Remove current master
+        os.remove(MASTER_DB_PATH)
+        print(f"✅ Removed current master")
+        
+        # Create fresh master from template
+        base_template = "templates/Directory-5.xlsx"
+        shutil.copy(base_template, MASTER_DB_PATH)
+        print(f"✅ Created fresh master database")
+        
+        # Upload backup to Hostinger
+        hostinger_url = upload_master_to_hostinger()
+        
+        print(f"{'='*60}\n")
+        
+        return {
+            "status": "success",
+            "message": "Master database reset successfully",
+            "backup_file": backup_path,
+            "hostinger_url": hostinger_url,
+            "timestamp": timestamp
+        }
+        
+    except Exception as e:
+        print(f"❌ Error resetting master database: {str(e)}")
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@app.post("/database/delete-all-records")
+def delete_all_records():
+    """
+    Delete all records from master database but keep the file structure.
+    More dangerous than reset - use with caution!
+    """
+    try:
+        print(f"\n{'='*60}")
+        print(f"🗑️  DELETE ALL RECORDS REQUEST")
+        print(f"{'='*60}")
+        
+        if not os.path.exists(MASTER_DB_PATH):
+            print("⚠️  Master database doesn't exist")
+            return {
+                "status": "error",
+                "message": "Master database doesn't exist"
+            }
+        
+        # Load the master workbook
+        master_wb = load_workbook(MASTER_DB_PATH)
+        
+        if 'Training Database' not in master_wb.sheetnames:
+            master_wb.close()
+            return {
+                "status": "error",
+                "message": "'Training Database' sheet not found"
+            }
+        
+        db_ws = master_wb['Training Database']
+        
+        # Count existing records
+        row_num = 14
+        record_count = 0
+        while db_ws[f'B{row_num}'].value is not None:
+            record_count += 1
+            row_num += 1
+        
+        print(f"Found {record_count} records to delete")
+        
+        # Delete all data from row 14 onwards
+        row_num = 14
+        deleted_rows = 0
+        while db_ws[f'B{row_num}'].value is not None:
+            for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'M', 'N']:
+                db_ws[f'{col}{row_num}'].value = None
+            row_num += 1
+            deleted_rows += 1
+        
+        # Save the master file
+        master_wb.save(MASTER_DB_PATH)
+        master_wb.close()
+        
+        print(f"✅ Deleted {deleted_rows} records from master database")
+        
+        # Upload to Hostinger
+        hostinger_url = upload_master_to_hostinger()
+        
+        print(f"{'='*60}\n")
+        
+        return {
+            "status": "success",
+            "message": f"Deleted {deleted_rows} records from master database",
+            "records_deleted": deleted_rows,
+            "hostinger_url": hostinger_url
+        }
+        
+    except Exception as e:
+        print(f"❌ Error deleting records: {str(e)}")
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+
+
+
+
+@app.get("/database/backup")
+def backup_master_database():
+    """
+    Create a backup of the current master database without resetting it.
+    """
+    try:
+        print(f"\n{'='*60}")
+        print(f"💾 DATABASE BACKUP REQUEST")
+        print(f"{'='*60}")
+        
+        if not os.path.exists(MASTER_DB_PATH):
+            return {
+                "status": "error",
+                "message": "Master database doesn't exist"
+            }
+        
+        # Create backup with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = f"{MASTER_DIR}/Training_Database_Master_BACKUP_{timestamp}.xlsx"
+        
+        # Backup current master
+        shutil.copy(MASTER_DB_PATH, backup_path)
+        file_size = os.path.getsize(backup_path)
+        
+        print(f"✅ Backed up master to: {backup_path}")
+        
+        # Also upload to Hostinger
+        hostinger_url = upload_master_to_hostinger()
+        
+        print(f"{'='*60}\n")
+        
+        return {
+            "status": "success",
+            "message": "Backup created successfully",
+            "backup_file": backup_path,
+            "file_size": file_size,
+            "hostinger_url": hostinger_url,
+            "timestamp": timestamp
+        }
+        
+    except Exception as e:
+        print(f"❌ Error creating backup: {str(e)}")
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "error": str(e)
+        }
 
 @app.post("/export-excel")
 def export_excel(request: ExportRequest) -> StreamingResponse:
@@ -581,3 +782,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"🚀 Starting Excel Export Service with Master Database + Hostinger Backup on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+
+
