@@ -1,6 +1,6 @@
 # main.py (Complete with Master Training Database + Hostinger Upload)
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
@@ -573,7 +573,15 @@ def backup_master_database():
             "status": "error",
             "error": str(e)
         }
+    
+@app.get("/warmup")
+def warmup():
+    return {"status": "ok"}
 
+@app.get("/ping")
+def ping():
+    return PlainTextResponse("ok")
+    
 @app.post("/export-excel")
 def export_excel(request: ExportRequest) -> StreamingResponse:
     try:
