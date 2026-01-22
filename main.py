@@ -167,36 +167,63 @@ def get_template_filename(trainee_count: int) -> str:
         return 'Directory-5.xlsx'
 
 async def fetch_image_async(url: str, session: aiohttp.ClientSession, max_retries: int = 2) -> Optional[bytes]:
-    """Fetch image asynchronously with retry logic"""
-    
-    # Check if URL is localhost (can't be accessed from Render)
-    if 'localhost' in url:
-        # Try to extract the actual image URL from the proxy URL
+    """Fetch image asynchronously with retry logic + content-type validation"""
+
+    # ✅ IMPORTANT: in LOCAL dev, you DO want to use localhost proxy
+    # So DON'T strip localhost when running locally
+    # We'll only strip localhost in Render by checking env var
+    RUNNING_ON_RENDER = bool(os.environ.get("RENDER")) or bool(os.environ.get("RENDER_SERVICE_ID"))
+
+    if RUNNING_ON_RENDER and 'localhost' in url:
         if '?url=' in url:
             url = url.split('?url=', 1)[1]
         else:
             return None
-    
+
     for attempt in range(max_retries):
         try:
             async with session.get(
                 url,
-                timeout=aiohttp.ClientTimeout(total=10),
+                timeout=aiohttp.ClientTimeout(total=20),
                 headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'image/*,*/*',
-                }
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "image/*,*/*",
+                },
+                allow_redirects=True,
             ) as response:
-                if response.status == 200:
-                    return await response.read()
-                    
+
+                ct = (response.headers.get("Content-Type") or "").lower()
+
+                if response.status != 200:
+                    print(f"   ❌ Fetch failed {response.status} {response.reason}: {url}")
+                    return None
+
+                # ✅ Make sure it's an actual image
+                if not ct.startswith("image/"):
+                    body_preview = (await response.text())[:120]
+                    print(f"   ❌ Not an image! Content-Type={ct} url={url}")
+                    print(f"      Body preview: {body_preview}")
+                    return None
+
+                data = await response.read()
+
+                # quick sanity
+                if len(data) < 200:
+                    print(f"   ❌ Image too small ({len(data)} bytes): {url}")
+                    return None
+
+                return data
+
         except asyncio.TimeoutError:
+            print(f"   ⏳ Timeout fetching image (attempt {attempt+1}/{max_retries}): {url}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(0.5)
+
         except Exception as e:
+            print(f"   ❌ Exception fetching image: {type(e).__name__}: {e}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(0.5)
-    
+
     return None
 
 async def fetch_all_images(trainees: List[Trainee], proxy_url: Optional[str]) -> List[Optional[bytes]]:
@@ -699,12 +726,11 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
             ws[f'T{row_num}'] = mode_of_training
             ws[f'U{row_num}'] = f"#{trainee.schedule_id[-4:]}"
             
-            # Add image if we fetched it successfully
+           # Add image if we fetched it successfully
             if trainee.picture_2x2_url:
                 images_attempted += 1
                 image_data = image_results[i]
-                
-                # Check if image fetch was successful
+
                 if image_data and not isinstance(image_data, Exception):
                     try:
                         if len(image_data) < 100:
@@ -712,44 +738,50 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
                             images_failed += 1
                             failed_images.append(f"{trainee.first_name} {trainee.last_name}")
                         else:
-                            # ✅ Validate image format before processing
+                            # ✅ Validate + normalize using PIL
                             try:
-                                # Detect image type
-                                img_format = imghdr.what(None, h=image_data)
-                                
-                                # Check if it's a supported format
-                                supported_formats = ['jpeg', 'jpg', 'png', 'gif', 'bmp', 'tiff']
-                                
-                                if img_format not in supported_formats:
-                                    print(f"   ⚠️  Unsupported image format: .{img_format}")
-                                    images_failed += 1
-                                    failed_images.append(f"{trainee.first_name} {trainee.last_name} (format: .{img_format})")
+                                bio = BytesIO(image_data)
+
+                                # Validate
+                                test_img = PILImage.open(bio)
+                                test_img.verify()
+
+                                # Re-open after verify()
+                                bio.seek(0)
+                                pil_img = PILImage.open(bio)
+
+                                # Normalize
+                                if pil_img.mode not in ("RGB", "L"):
+                                    pil_img = pil_img.convert("RGB")
                                 else:
-                                    # Try to open and convert image with PIL first
-                                    pil_img = PILImage.open(BytesIO(image_data))
-                                    
-                                    # Convert to RGB if needed (handles RGBA, P, etc.)
-                                    if pil_img.mode not in ('RGB', 'L'):
-                                        pil_img = pil_img.convert('RGB')
-                                    
-                                    # Save to bytes as JPEG (most compatible)
-                                    img_bytes = BytesIO()
-                                    pil_img.save(img_bytes, format='JPEG', quality=85)
-                                    img_bytes.seek(0)
-                                    
-                                    # Now create openpyxl image
-                                    img = OpenpyxlImage(img_bytes)
-                                    img.width = 96
-                                    img.height = 96
-                                    ws.add_image(img, f'S{row_num}')
-                                    images_successful += 1
-                                    print(f"   ✅ Image added ({len(image_data):,} bytes, format: {img_format})")
-                                    
+                                    pil_img = pil_img.convert("RGB")
+
+                                # Save as JPEG (best for openpyxl)
+                                out = BytesIO()
+                                pil_img.save(out, format="JPEG", quality=85)
+                                out.seek(0)
+
+                                img = OpenpyxlImage(out)
+                                img.width = 96
+                                img.height = 96
+
+                                # ✅ Make the cell space match the image so it’s visible
+                                ws.row_dimensions[row_num].height = 72        # ~96px
+                                ws.column_dimensions["S"].width = 14          # widen image column
+
+                                # ✅ Anchor to the cell
+                                cell = f"S{row_num}"
+                                ws.add_image(img, cell)
+
+
+                                images_successful += 1
+                                print(f"   ✅ Image added ({len(image_data):,} bytes)")
+
                             except Exception as format_error:
-                                print(f"   ⚠️  Image format validation failed: {str(format_error)}")
+                                print(f"   ⚠️  Image validation/conversion failed: {format_error}")
                                 images_failed += 1
                                 failed_images.append(f"{trainee.first_name} {trainee.last_name} (validation error)")
-                                
+
                     except Exception as e:
                         images_failed += 1
                         failed_images.append(f"{trainee.first_name} {trainee.last_name}")
@@ -760,7 +792,7 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
                     error_msg = str(image_data) if isinstance(image_data, Exception) else "Unknown error"
                     print(f"   ❌ Failed to fetch: {error_msg[:50]}")
             else:
-                print(f"   ⚪ No image URL")
+                print(f"   ⚠️  No image URL provided")
         
         print(f"\n{'='*60}")
         print(f"📸 IMAGE PROCESSING SUMMARY")
