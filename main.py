@@ -9,7 +9,6 @@ from openpyxl.drawing.image import Image as OpenpyxlImage
 import requests
 from io import BytesIO
 from PIL import Image as PILImage
-import imghdr
 import os
 import shutil
 import traceback
@@ -713,16 +712,48 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
                             images_failed += 1
                             failed_images.append(f"{trainee.first_name} {trainee.last_name}")
                         else:
-                            img = OpenpyxlImage(BytesIO(image_data))
-                            img.width = 96
-                            img.height = 96
-                            ws.add_image(img, f'S{row_num}')
-                            images_successful += 1
-                            print(f"   ✅ Image added ({len(image_data):,} bytes)")
+                            # ✅ Validate image format before processing
+                            try:
+                                # Detect image type
+                                img_format = imghdr.what(None, h=image_data)
+                                
+                                # Check if it's a supported format
+                                supported_formats = ['jpeg', 'jpg', 'png', 'gif', 'bmp', 'tiff']
+                                
+                                if img_format not in supported_formats:
+                                    print(f"   ⚠️  Unsupported image format: .{img_format}")
+                                    images_failed += 1
+                                    failed_images.append(f"{trainee.first_name} {trainee.last_name} (format: .{img_format})")
+                                else:
+                                    # Try to open and convert image with PIL first
+                                    pil_img = PILImage.open(BytesIO(image_data))
+                                    
+                                    # Convert to RGB if needed (handles RGBA, P, etc.)
+                                    if pil_img.mode not in ('RGB', 'L'):
+                                        pil_img = pil_img.convert('RGB')
+                                    
+                                    # Save to bytes as JPEG (most compatible)
+                                    img_bytes = BytesIO()
+                                    pil_img.save(img_bytes, format='JPEG', quality=85)
+                                    img_bytes.seek(0)
+                                    
+                                    # Now create openpyxl image
+                                    img = OpenpyxlImage(img_bytes)
+                                    img.width = 96
+                                    img.height = 96
+                                    ws.add_image(img, f'S{row_num}')
+                                    images_successful += 1
+                                    print(f"   ✅ Image added ({len(image_data):,} bytes, format: {img_format})")
+                                    
+                            except Exception as format_error:
+                                print(f"   ⚠️  Image format validation failed: {str(format_error)}")
+                                images_failed += 1
+                                failed_images.append(f"{trainee.first_name} {trainee.last_name} (validation error)")
+                                
                     except Exception as e:
                         images_failed += 1
                         failed_images.append(f"{trainee.first_name} {trainee.last_name}")
-                        print(f"   ❌ Error adding image: {type(e).__name__}")
+                        print(f"   ❌ Error adding image: {type(e).__name__}: {str(e)}")
                 else:
                     images_failed += 1
                     failed_images.append(f"{trainee.first_name} {trainee.last_name}")
