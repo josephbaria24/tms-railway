@@ -18,6 +18,8 @@ from pathlib import Path
 from ftplib import FTP
 import asyncio
 import aiohttp
+from typing import Tuple, Union
+
 
 app = FastAPI(title="Excel Export Service")
 
@@ -166,82 +168,69 @@ def get_template_filename(trainee_count: int) -> str:
     else:
         return 'Directory-5.xlsx'
 
-async def fetch_image_async(url: str, session: aiohttp.ClientSession, max_retries: int = 2) -> Optional[bytes]:
-    """Fetch image asynchronously with retry logic + content-type validation"""
+async def fetch_image_async(
+    url: str,
+    session: aiohttp.ClientSession,
+    max_retries: int = 2
+) -> Tuple[Optional[bytes], str]:
+    """Fetch image; returns (data, reason)."""
 
-    # ✅ IMPORTANT: in LOCAL dev, you DO want to use localhost proxy
-    # So DON'T strip localhost when running locally
-    # We'll only strip localhost in Render by checking env var
     RUNNING_ON_RENDER = bool(os.environ.get("RENDER")) or bool(os.environ.get("RENDER_SERVICE_ID"))
 
-    if RUNNING_ON_RENDER and 'localhost' in url:
-        if '?url=' in url:
-            url = url.split('?url=', 1)[1]
+    if RUNNING_ON_RENDER and "localhost" in url:
+        if "?url=" in url:
+            url = url.split("?url=", 1)[1]
         else:
-            return None
+            return None, "proxy-url-unusable-on-render"
+
+    last_reason = "unknown"
 
     for attempt in range(max_retries):
         try:
             async with session.get(
                 url,
                 timeout=aiohttp.ClientTimeout(total=20),
-                headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Accept": "image/*,*/*",
-                },
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "image/*,*/*"},
                 allow_redirects=True,
             ) as response:
-
                 ct = (response.headers.get("Content-Type") or "").lower()
 
                 if response.status != 200:
-                    print(f"   ❌ Fetch failed {response.status} {response.reason}: {url}")
-                    return None
+                    return None, f"http-{response.status}-{response.reason}"
 
-                # ✅ Make sure it's an actual image
                 if not ct.startswith("image/"):
-                    body_preview = (await response.text())[:120]
-                    print(f"   ❌ Not an image! Content-Type={ct} url={url}")
-                    print(f"      Body preview: {body_preview}")
-                    return None
+                    # likely HTML/json error page
+                    return None, f"not-image-content-type:{ct}"
 
                 data = await response.read()
 
-                # quick sanity
                 if len(data) < 200:
-                    print(f"   ❌ Image too small ({len(data)} bytes): {url}")
-                    return None
+                    return None, f"too-small:{len(data)}"
 
-                return data
+                return data, "ok"
 
         except asyncio.TimeoutError:
-            print(f"   ⏳ Timeout fetching image (attempt {attempt+1}/{max_retries}): {url}")
+            last_reason = "timeout"
             if attempt < max_retries - 1:
                 await asyncio.sleep(0.5)
-
         except Exception as e:
-            print(f"   ❌ Exception fetching image: {type(e).__name__}: {e}")
+            last_reason = f"exception:{type(e).__name__}"
             if attempt < max_retries - 1:
                 await asyncio.sleep(0.5)
 
-    return None
+    return None, last_reason
 
-async def fetch_all_images(trainees: List[Trainee], proxy_url: Optional[str]) -> List[Optional[bytes]]:
-    """Fetch all images in parallel"""
+async def fetch_all_images(trainees: List[Trainee], proxy_url: Optional[str]):
     async with aiohttp.ClientSession() as session:
         tasks = []
         for trainee in trainees:
             if trainee.picture_2x2_url:
-                if proxy_url:
-                    img_url = f"{proxy_url}?url={trainee.picture_2x2_url}"
-                else:
-                    img_url = trainee.picture_2x2_url
+                img_url = f"{proxy_url}?url={trainee.picture_2x2_url}" if proxy_url else trainee.picture_2x2_url
                 tasks.append(fetch_image_async(img_url, session))
             else:
-                # No image for this trainee
-                tasks.append(asyncio.sleep(0, result=None))
-        
+                tasks.append(asyncio.sleep(0, result=(None, "no-url")))
         return await asyncio.gather(*tasks, return_exceptions=True)
+
 
 def ensure_master_exists():
     """Ensure master training database exists"""
@@ -729,63 +718,61 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
            # Add image if we fetched it successfully
             if trainee.picture_2x2_url:
                 images_attempted += 1
-                image_data = image_results[i]
+                result = image_results[i]
 
-                if image_data and not isinstance(image_data, Exception):
-                    try:
-                        if len(image_data) < 100:
-                            print(f"   ⚠️  Image too small ({len(image_data)} bytes)")
-                            images_failed += 1
-                            failed_images.append(f"{trainee.first_name} {trainee.last_name}")
-                        else:
-                            # ✅ Validate + normalize using PIL
-                            try:
-                                bio = BytesIO(image_data)
-
-                                # Validate
-                                test_img = PILImage.open(bio)
-                                test_img.verify()
-
-                                # Re-open after verify()
-                                bio.seek(0)
-                                pil_img = PILImage.open(bio)
-
-                                # Normalize
-                                if pil_img.mode not in ("RGB", "L"):
-                                    pil_img = pil_img.convert("RGB")
-                                else:
-                                    pil_img = pil_img.convert("RGB")
-
-                                # Save as JPEG (best for openpyxl)
-                                out = BytesIO()
-                                pil_img.save(out, format="JPEG", quality=85)
-                                out.seek(0)
-
-                                img = OpenpyxlImage(out)
-                                img.width = 96
-                                img.height = 96
-
-                                # ✅ Make the cell space match the image so it’s visible
-                                ws.row_dimensions[row_num].height = 72        # ~96px
-                                ws.column_dimensions["S"].width = 14          # widen image column
-
-                                # ✅ Anchor to the cell
-                                cell = f"S{row_num}"
-                                ws.add_image(img, cell)
+                if isinstance(result, Exception):
+                    image_data, reason = None, f"exception:{type(result).__name__}"
+                else:
+                    image_data, reason = result
 
 
-                                images_successful += 1
-                                print(f"   ✅ Image added ({len(image_data):,} bytes)")
+                    # ✅ EARLY FAIL: if fetch didn't return bytes, log the real reason + URL and skip
+                if not image_data:
+                    images_failed += 1
+                    failed_images.append(f"{trainee.first_name} {trainee.last_name} ({reason})")
+                    print(f"   ❌ Failed to fetch: {reason}")
+                    print(f"      URL: {trainee.picture_2x2_url}")
+                    continue
 
-                            except Exception as format_error:
-                                print(f"   ⚠️  Image validation/conversion failed: {format_error}")
-                                images_failed += 1
-                                failed_images.append(f"{trainee.first_name} {trainee.last_name} (validation error)")
-
-                    except Exception as e:
+                # ✅ at this point, image_data is bytes
+                try:
+                    if len(image_data) < 100:
+                        print(f"   ⚠️  Image too small ({len(image_data)} bytes)")
                         images_failed += 1
-                        failed_images.append(f"{trainee.first_name} {trainee.last_name}")
-                        print(f"   ❌ Error adding image: {type(e).__name__}: {str(e)}")
+                        failed_images.append(f"{trainee.first_name} {trainee.last_name} (too small)")
+                        continue
+
+                    # Validate + normalize using PIL
+                    bio = BytesIO(image_data)
+
+                    test_img = PILImage.open(bio)
+                    test_img.verify()
+
+                    bio.seek(0)
+                    pil_img = PILImage.open(bio).convert("RGB")
+
+                    out = BytesIO()
+                    pil_img.save(out, format="JPEG", quality=85)
+                    out.seek(0)
+
+                    img = OpenpyxlImage(out)
+                    img.width = 96
+                    img.height = 96
+
+                    ws.row_dimensions[row_num].height = 72
+                    ws.column_dimensions["S"].width = 14
+
+                    ws.add_image(img, f"S{row_num}")
+
+                    images_successful += 1
+                    print(f"   ✅ Image added ({len(image_data):,} bytes)")
+
+                except Exception as e:
+                    images_failed += 1
+                    failed_images.append(f"{trainee.first_name} {trainee.last_name} (pil/openpyxl error)")
+                    print(f"   ⚠️  Image validation/conversion failed: {type(e).__name__}: {e}")
+                    print(f"      URL: {trainee.picture_2x2_url}")
+
                 else:
                     images_failed += 1
                     failed_images.append(f"{trainee.first_name} {trainee.last_name}")
