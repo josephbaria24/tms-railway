@@ -141,15 +141,15 @@ def upload_master_to_hostinger():
 def get_template_filename(trainee_count: int) -> str:
     """Determine which template to use based on trainee count"""
     if trainee_count > 250:
-        return 'Directory-300.xlsx'
+        return 'Directory-250.xlsx'
     elif trainee_count > 200:
         return 'Directory-250.xlsx'
     elif trainee_count > 150:
-        return 'Directory-200.xlsx'
+        return 'Directory-250.xlsx'
     elif trainee_count > 100:
-        return 'Directory-150.xlsx'
+        return 'Directory-250.xlsx'
     elif trainee_count > 50:
-        return 'Directory-100.xlsx'
+        return 'Directory-250.xlsx'
     elif trainee_count > 30:
         return 'Directory-0.xlsx'
     elif trainee_count > 25:
