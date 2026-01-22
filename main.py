@@ -150,11 +150,11 @@ def get_template_filename(trainee_count: int) -> str:
     elif trainee_count > 200:
         return 'Directory-250.xlsx'
     elif trainee_count > 150:
-        return 'Directory-250.xlsx'
+        return 'Directory-200.xlsx'
     elif trainee_count > 100:
-        return 'Directory-250.xlsx'
+        return 'Directory-150.xlsx'
     elif trainee_count > 50:
-        return 'Directory-250.xlsx'
+        return 'Directory-100.xlsx'
     elif trainee_count > 30:
         return 'Directory-0.xlsx'
     elif trainee_count > 25:
