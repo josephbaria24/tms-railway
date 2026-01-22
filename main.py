@@ -8,6 +8,8 @@ from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as OpenpyxlImage
 import requests
 from io import BytesIO
+from PIL import Image as PILImage
+import imghdr
 import os
 import shutil
 import traceback
