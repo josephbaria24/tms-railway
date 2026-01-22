@@ -198,9 +198,14 @@ async def fetch_image_async(
                 if response.status != 200:
                     return None, f"http-{response.status}-{response.reason}"
 
+                # ✅ Some servers mis-label images (e.g. .jfif) as text/plain.
+                # We'll still download and let PIL validate later.
                 if not ct.startswith("image/"):
-                    # likely HTML/json error page
-                    return None, f"not-image-content-type:{ct}"
+                    # allow common "wrong" content-types, we will validate via PIL later
+                    allowed_wrong = {"text/plain", "application/octet-stream"}
+                    if ct not in allowed_wrong:
+                        return None, f"not-image-content-type:{ct}"
+
 
                 data = await response.read()
 
@@ -766,6 +771,8 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
 
                     images_successful += 1
                     print(f"   ✅ Image added ({len(image_data):,} bytes)")
+                    continue
+
 
                 except Exception as e:
                     images_failed += 1
