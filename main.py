@@ -1,4 +1,4 @@
-# main.py (Complete with Master Training Database + Hostinger Upload)
+# main.py (Optimized with Parallel Image Processing + Master Database + Hostinger Upload)
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +15,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 from ftplib import FTP
+import asyncio
+import aiohttp
 
 app = FastAPI(title="Excel Export Service")
 
@@ -163,54 +165,55 @@ def get_template_filename(trainee_count: int) -> str:
     else:
         return 'Directory-5.xlsx'
 
-def fetch_image_with_retry(url: str, max_retries: int = 3) -> Optional[bytes]:
-    """Fetch image with retry logic"""
+async def fetch_image_async(url: str, session: aiohttp.ClientSession, max_retries: int = 2) -> Optional[bytes]:
+    """Fetch image asynchronously with retry logic"""
     
     # Check if URL is localhost (can't be accessed from Render)
     if 'localhost' in url:
-        print(f"   ⚠️  WARNING: URL contains 'localhost' - this won't work from Render!")
-        print(f"   💡 Trying to extract actual image URL...")
-        
         # Try to extract the actual image URL from the proxy URL
         if '?url=' in url:
-            actual_url = url.split('?url=', 1)[1]
-            print(f"   ✅ Extracted actual URL: {actual_url[:100]}...")
-            url = actual_url
+            url = url.split('?url=', 1)[1]
         else:
-            print(f"   ❌ Cannot extract actual URL, will fail")
             return None
     
     for attempt in range(max_retries):
         try:
-            print(f"   Attempt {attempt + 1}/{max_retries}...")
-            
-            response = requests.get(
-                url, 
-                timeout=30,
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=10),
                 headers={
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Accept': 'image/*,*/*',
                 }
-            )
-            
-            if response.status_code == 200:
-                return response.content
-            else:
-                print(f"   HTTP {response.status_code}: {response.reason}")
-                
+            ) as response:
+                if response.status == 200:
+                    return await response.read()
+                    
+        except asyncio.TimeoutError:
             if attempt < max_retries - 1:
-                time.sleep(1)
-                
-        except requests.exceptions.Timeout:
-            print(f"   Timeout on attempt {attempt + 1}")
-            if attempt < max_retries - 1:
-                time.sleep(1)
+                await asyncio.sleep(0.5)
         except Exception as e:
-            print(f"   Error on attempt {attempt + 1}: {str(e)}")
             if attempt < max_retries - 1:
-                time.sleep(1)
+                await asyncio.sleep(0.5)
     
     return None
+
+async def fetch_all_images(trainees: List[Trainee], proxy_url: Optional[str]) -> List[Optional[bytes]]:
+    """Fetch all images in parallel"""
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for trainee in trainees:
+            if trainee.picture_2x2_url:
+                if proxy_url:
+                    img_url = f"{proxy_url}?url={trainee.picture_2x2_url}"
+                else:
+                    img_url = trainee.picture_2x2_url
+                tasks.append(fetch_image_async(img_url, session))
+            else:
+                # No image for this trainee
+                tasks.append(asyncio.sleep(0, result=None))
+        
+        return await asyncio.gather(*tasks, return_exceptions=True)
 
 def ensure_master_exists():
     """Ensure master training database exists"""
@@ -331,10 +334,11 @@ def copy_master_database_to_export(wb):
 @app.get("/")
 def read_root() -> dict:
     return {
-        "service": "Excel Export Service with Master Database + Hostinger Backup",
+        "service": "Excel Export Service with Parallel Image Processing + Master Database",
         "status": "running",
-        "version": "4.0.0",
+        "version": "5.0.0",
         "features": [
+            "Parallel image processing (async)", 
             "Image proxying", 
             "Hostinger support", 
             "Master database", 
@@ -446,7 +450,6 @@ def reset_master_database():
             "error": str(e)
         }
 
-
 @app.post("/database/delete-all-records")
 def delete_all_records():
     """
@@ -520,11 +523,6 @@ def delete_all_records():
             "status": "error",
             "error": str(e)
         }
-
-
-
-
-
 
 @app.get("/database/backup")
 def backup_master_database():
@@ -645,6 +643,21 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
         
         print(f"👥 Gender Distribution: Male={male_count}, Female={female_count}")
         
+        # ✅ FETCH ALL IMAGES IN PARALLEL FIRST
+        print(f"\n{'='*60}")
+        print(f"📸 FETCHING ALL IMAGES IN PARALLEL")
+        print(f"{'='*60}")
+        
+        images_with_urls = sum(1 for t in trainees if t.picture_2x2_url)
+        print(f"Trainees with image URLs: {images_with_urls}/{trainee_count}")
+        
+        image_fetch_start = time.time()
+        image_results = asyncio.run(fetch_all_images(trainees, proxy_url))
+        image_fetch_duration = time.time() - image_fetch_start
+        
+        print(f"✅ All images fetched in {image_fetch_duration:.2f}s")
+        print(f"{'='*60}\n")
+        
         # Participant rows start from row 15
         start_row = 15
         images_attempted = 0
@@ -652,8 +665,8 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
         images_failed = 0
         failed_images = []
         
-        print(f"\n{'='*60}")
-        print(f"📝 PROCESSING TRAINEES")
+        print(f"{'='*60}")
+        print(f"📝 PROCESSING TRAINEES & ADDING TO EXCEL")
         print(f"{'='*60}\n")
         
         for i, trainee in enumerate(trainees):
@@ -685,56 +698,50 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
             ws[f'T{row_num}'] = mode_of_training
             ws[f'U{row_num}'] = f"#{trainee.schedule_id[-4:]}"
             
-            # Add image if picture URL exists
+            # Add image if we fetched it successfully
             if trainee.picture_2x2_url:
                 images_attempted += 1
-                print(f"   📸 Processing image...")
+                image_data = image_results[i]
                 
-                try:
-                    if proxy_url:
-                        img_url = f"{proxy_url}?url={trainee.picture_2x2_url}"
-                        print(f"   🔗 Via proxy")
-                    else:
-                        img_url = trainee.picture_2x2_url
-                        print(f"   🔗 Direct")
-                    
-                    image_data = fetch_image_with_retry(img_url)
-                    
-                    if image_data:
+                # Check if image fetch was successful
+                if image_data and not isinstance(image_data, Exception):
+                    try:
                         if len(image_data) < 100:
-                            print(f"   ⚠️  Image too small")
+                            print(f"   ⚠️  Image too small ({len(image_data)} bytes)")
                             images_failed += 1
                             failed_images.append(f"{trainee.first_name} {trainee.last_name}")
-                            continue
-                        
-                        img = OpenpyxlImage(BytesIO(image_data))
-                        img.width = 96
-                        img.height = 96
-                        ws.add_image(img, f'S{row_num}')
-                        images_successful += 1
-                        print(f"   ✅ Image added ({len(image_data)} bytes)")
-                    else:
+                        else:
+                            img = OpenpyxlImage(BytesIO(image_data))
+                            img.width = 96
+                            img.height = 96
+                            ws.add_image(img, f'S{row_num}')
+                            images_successful += 1
+                            print(f"   ✅ Image added ({len(image_data):,} bytes)")
+                    except Exception as e:
                         images_failed += 1
                         failed_images.append(f"{trainee.first_name} {trainee.last_name}")
-                        print(f"   ❌ Failed to fetch image")
-                        
-                except Exception as e:
+                        print(f"   ❌ Error adding image: {type(e).__name__}")
+                else:
                     images_failed += 1
                     failed_images.append(f"{trainee.first_name} {trainee.last_name}")
-                    print(f"   ❌ Error: {type(e).__name__}")
+                    error_msg = str(image_data) if isinstance(image_data, Exception) else "Unknown error"
+                    print(f"   ❌ Failed to fetch: {error_msg[:50]}")
             else:
                 print(f"   ⚪ No image URL")
         
         print(f"\n{'='*60}")
         print(f"📸 IMAGE PROCESSING SUMMARY")
         print(f"{'='*60}")
+        print(f"Total fetch time: {image_fetch_duration:.2f}s")
         print(f"Attempted: {images_attempted}")
         print(f"Successful: {images_successful}")
         print(f"Failed: {images_failed}")
         if failed_images:
-            print(f"\nFailed images for:")
-            for name in failed_images:
+            print(f"\n⚠️  Failed images for:")
+            for name in failed_images[:10]:  # Show first 10
                 print(f"  • {name}")
+            if len(failed_images) > 10:
+                print(f"  ... and {len(failed_images) - 10} more")
         print(f"{'='*60}\n")
         
         # Update master database
@@ -788,9 +795,5 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    print(f"🚀 Starting Excel Export Service with Master Database + Hostinger Backup on port {port}")
+    print(f"🚀 Starting Excel Export Service with Parallel Image Processing on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
-
-
-
-
