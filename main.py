@@ -73,6 +73,7 @@ class ExportRequest(BaseModel):
     proxyUrl: Optional[str] = None
     eventType: Optional[str] = None
     branch: Optional[str] = None
+    batchNumber: Optional[int] = None
 
 def upload_master_to_hostinger():
     """Upload the master Excel file to Hostinger via FTP"""
@@ -612,6 +613,7 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
         proxy_url = request.proxyUrl
         event_type = request.eventType or 'public'
         branch = request.branch or 'online'
+        batch_number = request.batchNumber
         
         # Determine mode of training
         if event_type.lower() == 'public':
@@ -658,6 +660,8 @@ def export_excel(request: ExportRequest) -> StreamingResponse:
         # Fill header information
         ws['C10'] = course_name
         ws['C11'] = training_dates
+        if batch_number:
+            ws['C12'] = f"Batch #{batch_number}"
         
         # Count gender
         male_count = sum(1 for t in trainees if t.gender and t.gender.lower() == 'male')
